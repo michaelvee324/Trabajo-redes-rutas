@@ -37,7 +37,7 @@ CONFIG = {
     'FUEL_PRICE_PER_GALLON': 2.70,    # Dólares por galón
     
     'POPULATION_SIZE': 60,
-    'GENERATIONS': 3500,
+    'GENERATIONS': 400,
     'MUTATION_PROBABILITY': 0.25,
     'TOURNAMENT_SIZE': 5,
     
@@ -46,7 +46,6 @@ CONFIG = {
     
     'MAX_BASURA_SUBGRAFO': 57.59
 }
-
 
 class VRPSystem:
     def __init__(self, gpkg_file="cuenca_limpieza.gpkg"):
@@ -254,7 +253,7 @@ class VRPSystem:
             return [node_from, node_to]
 
 
-def evaluate_chromosome(chromosome, system):
+"""def evaluate_chromosome(chromosome, system):
     routes = []
     current_route = []
     
@@ -390,15 +389,243 @@ def evaluate_chromosome(chromosome, system):
         missing = set(chromosome) - visited
         print(f"Faltantes: {list(missing)[:5]}...")  # Mostrar primeros 5
         
+    return total_distance, routes"""
+
+
+"""
+def evaluate_chromosome(chromosome, system, n_trucks=2):
+    
+    Evalúa un cromosoma dividiéndolo en exactamente n_trucks rutas.
+    El punto de división es el 'gen' que separa los clientes entre camiones.
+    Penaliza fuertemente si algún camión viola capacidad o tiempo.
+    
+    size = len(chromosome)
+
+    # Dividir el cromosoma en n_trucks segmentos iguales (el GA aprenderá
+    # a mover el punto de corte implícitamente a través de la ordenación)
+    # Para 2 camiones: la primera mitad va al camión 1, la segunda al camión 2.
+    # NOTA: el GA puede descubrir mejores divisiones explorando permutaciones.
+    split = size // n_trucks
+    segments = []
+    for i in range(n_trucks):
+        start = i * split
+        end = (i + 1) * split if i < n_trucks - 1 else size
+        segments.append(chromosome[start:end])
+
+    routes = []
+    total_distance = 0.0
+    INFEASIBILITY_PENALTY = 99999.0  # Penalización por violar restricciones
+
+    for seg in segments:
+        if not seg:
+            continue
+
+        route = []
+        current_load = 0.0
+        current_time = 0.0
+        current_node = system.garage
+        feasible = True
+
+        for customer in seg:
+            node_demand = system.city_graph.nodes[customer].get('demand', 1.0)
+
+            # Velocidad según estado
+            if current_node in (system.garage, system.landfill):
+                speed = CONFIG['SPEED_EMPTY_TO_ZONE']
+            else:
+                speed = CONFIG['SPEED_COLLECTING']
+
+            dist_to_cust = system.get_dist_km(current_node, customer)
+            time_to_cust = dist_to_cust / speed
+            service_time = CONFIG['COLLECTION_TIME']
+
+            dist_cust_to_dump = system.get_dist_km(customer, system.landfill)
+            time_cust_to_dump = dist_cust_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
+            dist_dump_to_garage = system.get_dist_km(system.landfill, system.garage)
+            time_dump_to_garage = dist_dump_to_garage / CONFIG['SPEED_RETURN_EMPTY']
+
+            time_if_add = (current_time + time_to_cust + service_time +
+                           time_cust_to_dump + time_dump_to_garage)
+
+            if (current_load + node_demand <= CONFIG['MAX_CAPACITY'] and
+                    time_if_add <= CONFIG['MAX_SHIFT_TIME']):
+                # Cabe directo
+                route.append(customer)
+                current_load += node_demand
+                current_time += time_to_cust + service_time
+                total_distance += dist_to_cust
+                current_node = customer
+            else:
+                # Intentar descarga intermedia (dentro del mismo camión)
+                dist_to_dump = system.get_dist_km(current_node, system.landfill)
+                time_to_dump = dist_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
+                time_at_dump = current_time + time_to_dump
+                dist_dump_to_cust = system.get_dist_km(system.landfill, customer)
+                time_dump_to_cust = dist_dump_to_cust / CONFIG['SPEED_EMPTY_TO_ZONE']
+
+                projected_time = (time_at_dump + time_dump_to_cust + service_time +
+                                  time_cust_to_dump + time_dump_to_garage)
+
+                can_intermediate = (
+                        current_load + node_demand > CONFIG['MAX_CAPACITY'] and
+                        projected_time <= CONFIG['MAX_SHIFT_TIME'] and
+                        node_demand <= CONFIG['MAX_CAPACITY']
+                )
+
+                if can_intermediate:
+                    route.append(system.landfill)
+                    total_distance += dist_to_dump + dist_dump_to_cust
+                    current_load = node_demand
+                    current_time = time_at_dump + time_dump_to_cust + service_time
+                    route.append(customer)
+                    current_node = customer
+                else:
+                    # Imposible servir este cliente en este camión → INVIABLE
+                    feasible = False
+                    total_distance += INFEASIBILITY_PENALTY
+
+        # Cerrar la ruta: último cliente → vertedero → garage
+        if route:
+            last = route[-1] if route[-1] != system.landfill else system.landfill
+            total_distance += system.get_dist_km(last, system.landfill)
+            total_distance += system.get_dist_km(system.landfill, system.garage)
+            routes.append(route)
+
+    return total_distance, routes"""
+
+def evaluate_chromosome(chromosome, system, n_trucks=2):
+    """
+    Evalúa un cromosoma con gen de corte variable.
+ 
+    El cromosoma tiene formato: [c1, c2, ..., cN, split_point]
+    donde split_point define cuántos clientes van al camión 1.
+ 
+    Penaliza fuertemente si algún camión viola capacidad o tiempo.
+    """
+    # Separar clientes del gen de corte
+    clients = chromosome[:-1]
+    split = chromosome[-1]
+ 
+    # Asegurar que el split es válido
+    n = len(clients)
+    split = max(1, min(split, n - 1))
+ 
+    segments = [clients[:split], clients[split:]]
+ 
+    routes = []
+    total_distance = 0.0
+    INFEASIBILITY_PENALTY = 99999.0
+ 
+    for seg in segments:
+        if not seg:
+            continue
+ 
+        route = []
+        current_load = 0.0
+        current_time = 0.0
+        current_node = system.garage
+        feasible = True
+ 
+        for customer in seg:
+            node_demand = system.city_graph.nodes[customer].get('demand', 1.0)
+ 
+            if current_node in (system.garage, system.landfill):
+                speed = CONFIG['SPEED_EMPTY_TO_ZONE']
+            else:
+                speed = CONFIG['SPEED_COLLECTING']
+ 
+            dist_to_cust = system.get_dist_km(current_node, customer)
+            time_to_cust = dist_to_cust / speed
+            service_time = CONFIG['COLLECTION_TIME']
+ 
+            dist_cust_to_dump = system.get_dist_km(customer, system.landfill)
+            time_cust_to_dump = dist_cust_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
+            dist_dump_to_garage = system.get_dist_km(system.landfill, system.garage)
+            time_dump_to_garage = dist_dump_to_garage / CONFIG['SPEED_RETURN_EMPTY']
+ 
+            time_if_add = (current_time + time_to_cust + service_time +
+                           time_cust_to_dump + time_dump_to_garage)
+ 
+            if (current_load + node_demand <= CONFIG['MAX_CAPACITY'] and
+                    time_if_add <= CONFIG['MAX_SHIFT_TIME']):
+                route.append(customer)
+                current_load += node_demand
+                current_time += time_to_cust + service_time
+                total_distance += dist_to_cust
+                current_node = customer
+            else:
+                # Intentar descarga intermedia
+                dist_to_dump = system.get_dist_km(current_node, system.landfill)
+                time_to_dump = dist_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
+                time_at_dump = current_time + time_to_dump
+                dist_dump_to_cust = system.get_dist_km(system.landfill, customer)
+                time_dump_to_cust = dist_dump_to_cust / CONFIG['SPEED_EMPTY_TO_ZONE']
+ 
+                projected_time = (time_at_dump + time_dump_to_cust + service_time +
+                                  time_cust_to_dump + time_dump_to_garage)
+ 
+                can_intermediate = (
+                    current_load + node_demand > CONFIG['MAX_CAPACITY'] and
+                    projected_time <= CONFIG['MAX_SHIFT_TIME'] and
+                    node_demand <= CONFIG['MAX_CAPACITY']
+                )
+ 
+                if can_intermediate:
+                    route.append(system.landfill)
+                    total_distance += dist_to_dump + dist_dump_to_cust
+                    current_load = node_demand
+                    current_time = time_at_dump + time_dump_to_cust + service_time
+                    route.append(customer)
+                    current_node = customer
+                else:
+                    feasible = False
+                    total_distance += INFEASIBILITY_PENALTY
+ 
+        if route:
+            last = route[-1]
+            total_distance += system.get_dist_km(last, system.landfill)
+            total_distance += system.get_dist_km(system.landfill, system.garage)
+            routes.append(route)
+ 
     return total_distance, routes
 
-def create_individual(node_list):
+def create_individual_2trucks(node_list):
+    """
+    Cromosoma = permutación de clientes.
+    La primera mitad va al camión 1, la segunda al camión 2.
+    El GA explorará implícitamente qué clientes van en cada camión
+    al reorganizar el orden.
+    """
     ind = node_list.copy()
     random.shuffle(ind)
     return ind
 
-def create_nearest_neighbor_individual(system, randomness=0.17):
+def create_nn_individual_2trucks(system, randomness=0.17):
+    """Nearest Neighbor para 2 camiones — igual que antes, el corte es implícito."""
+    return create_nearest_neighbor_individual(system, randomness)
+
+"""
+def create_individual(node_list):
+    ind = node_list.copy()
+    random.shuffle(ind)
+    return ind"""
+
+def create_individual(node_list):
     """
+    Cromosoma = permutación de clientes + gen de corte al final.
+    El gen de corte indica dónde se divide la lista entre los 2 camiones.
+    """
+    n = len(node_list)
+    ind = node_list.copy()
+    random.shuffle(ind)
+    split = random.randint(1, n - 1)  # Al menos 1 cliente por camión
+    ind.append(split)                 # El último elemento es el punto de corte
+    return ind
+
+
+    """
+def create_nearest_neighbor_individual(system, randomness=0.17):
+    
     Crea un individuo usando heurística de Vecino Más Cercano.
     
     Args:
@@ -408,7 +635,7 @@ def create_nearest_neighbor_individual(system, randomness=0.17):
     
     Returns:
         Lista ordenada de clientes (cromosoma)
-    """
+    
     unvisited = set(system.customers)
     route = []
     
@@ -432,6 +659,38 @@ def create_nearest_neighbor_individual(system, randomness=0.17):
         current = chosen_node
     
     return route
+    """
+    
+def create_nearest_neighbor_individual(system, randomness=0.17):
+    """
+    Heurística Nearest Neighbor para 2 camiones con gen de corte variable.
+ 
+    Construye el cromosoma ordenando clientes por proximidad desde el garage,
+    luego elige un punto de corte aleatorio sesgado al centro (para que ambos
+    camiones tengan carga razonable desde el inicio).
+    """
+    unvisited = set(system.customers)
+    route = []
+    current = system.garage
+ 
+    while unvisited:
+        distances = [(system.get_dist_km(current, node), node) for node in unvisited]
+        distances.sort()
+        k = max(1, int(len(distances) * randomness))
+        k = min(k, len(distances))
+        _, chosen_node = random.choice(distances[:k])
+        route.append(chosen_node)
+        unvisited.remove(chosen_node)
+        current = chosen_node
+ 
+    n = len(route)
+    # Punto de corte sesgado al centro ±25% para equilibrar carga inicial
+    centro = n // 2
+    margen = max(1, n // 4)
+    split = random.randint(max(1, centro - margen), min(n - 1, centro + margen))
+    route.append(split)
+    return route
+
 
 def calculate_real_physics(vrp, routes):
     
@@ -457,6 +716,7 @@ def calculate_real_physics(vrp, routes):
         
     return real_distance, real_load
 
+"""
 def ordered_crossover(parent1, parent2):
     size = len(parent1)
     a, b = sorted(random.sample(range(size), 2))
@@ -471,16 +731,65 @@ def ordered_crossover(parent1, parent2):
             child[current] = parent2[p2_idx]
             current = (current + 1) % size
         p2_idx = (p2_idx + 1) % size
-    return child
+    return child """
 
+def ordered_crossover(parent1, parent2):
+    """
+    OX Crossover adaptado: opera solo sobre la parte de clientes.
+    El gen de corte (último elemento) se hereda promediando ambos padres
+    y aplicando una pequeña perturbación aleatoria.
+    """
+    # Separar clientes y gen de corte
+    p1_clients = parent1[:-1]
+    p2_clients = parent2[:-1]
+    split1 = parent1[-1]
+    split2 = parent2[-1]
+ 
+    size = len(p1_clients)
+    a, b = sorted(random.sample(range(size), 2))
+    child_clients = [-1] * size
+    child_clients[a:b+1] = p1_clients[a:b+1]
+ 
+    current = (b + 1) % size
+    p2_idx = (b + 1) % size
+ 
+    while -1 in child_clients:
+        if p2_clients[p2_idx] not in child_clients:
+            child_clients[current] = p2_clients[p2_idx]
+            current = (current + 1) % size
+        p2_idx = (p2_idx + 1) % size
+ 
+    # Gen de corte: promedio de padres + perturbación aleatoria pequeña
+    avg_split = (split1 + split2) // 2
+    perturbacion = random.randint(-max(1, size // 8), max(1, size // 8))
+    child_split = max(1, min(size - 1, avg_split + perturbacion))
+ 
+    child_clients.append(child_split)
+    return child_clients
+
+"""
 def mutate(ind):
-    """Swap mutation: intercambia dos clientes aleatorios"""
+    Swap mutation: intercambia dos clientes aleatorios
     a, b = random.sample(range(len(ind)), 2)
     ind[a], ind[b] = ind[b], ind[a]
     return ind
+"""
 
-def inversion_mutation(ind):
+def mutate(ind):
     """
+    Swap mutation: intercambia dos clientes aleatorios.
+    El gen de corte (último elemento) no se toca.
+    """
+    clients = ind[:-1]
+    split = ind[-1]
+    a, b = random.sample(range(len(clients)), 2)
+    clients[a], clients[b] = clients[b], clients[a]
+    clients.append(split)
+    return clients
+
+"""
+def inversion_mutation(ind):
+    
     2-Opt / Inversion mutation: invierte un segmento de la ruta.
     Esto ayuda a deshacer cruces (nudos) en la ruta.
     
@@ -488,7 +797,7 @@ def inversion_mutation(ind):
     Antes: [A, B, C, D, E, F]
     Seleccionar segmento [B, C, D] (índices 1-3)
     Después: [A, D, C, B, E, F]
-    """
+    
     if len(ind) < 3:
         return ind
     
@@ -498,9 +807,51 @@ def inversion_mutation(ind):
     # Invertir el segmento entre i y j (inclusive)
     ind[i:j+1] = reversed(ind[i:j+1])
     
-    return ind
+    return ind"""
 
+def inversion_mutation(ind):
+    """
+    2-Opt / Inversion mutation: invierte un segmento de clientes.
+    Con probabilidad 0.3 también muta el gen de corte (±1 a ±3 posiciones).
+    """
+    clients = ind[:-1]
+    split = ind[-1]
+    n = len(clients)
+ 
+    if n >= 3:
+        i, j = sorted(random.sample(range(n), 2))
+        clients[i:j+1] = reversed(clients[i:j+1])
+ 
+    # Mutar el gen de corte ocasionalmente para explorar divisiones distintas
+    if random.random() < 0.3:
+        delta = random.randint(-3, 3)
+        split = max(1, min(n - 1, split + delta))
+ 
+    clients.append(split)
+    return clients
 
+def split_mutation(ind):
+    """
+    Mutación exclusiva del gen de corte: asigna un punto de división
+    completamente nuevo. Útil para escapar de divisiones localmente óptimas.
+    """
+    clients = ind[:-1]
+    n = len(clients)
+    new_split = random.randint(1, n - 1)
+    clients.append(new_split)
+    return clients
+ 
+ 
+def tournament_selection(scored, tournament_size):
+    """
+    Selección por torneo real usando CONFIG['TOURNAMENT_SIZE'].
+ 
+    Elige 'tournament_size' individuos al azar y retorna el de menor fitness.
+    Mayor tournament_size → mayor presión selectiva.
+    """
+    contenders = random.sample(scored, min(tournament_size, len(scored)))
+    winner = min(contenders, key=lambda x: x[0])
+    return winner[1]  # Retorna el cromosoma (ind)
 
 def detailed_audit(vrp, best_routes):
     print(f"\n{'='*70}")
@@ -1148,7 +1499,7 @@ import math
 
 def export_initial_solution_to_html(vrp, routes, filename="solucion_inicial.html"):
     print(f"\nGenerando mapa de SOLUCIÓN INICIAL: {filename}...")
-    
+
     try:
         G_latlon = ox.project_graph(vrp.city_graph, to_crs='epsg:4326')
     except:
@@ -1163,167 +1514,347 @@ def export_initial_solution_to_html(vrp, routes, filename="solucion_inicial.html
     if vrp.garage in G_latlon.nodes:
         gy, gx = G_latlon.nodes[vrp.garage]['y'], G_latlon.nodes[vrp.garage]['x']
     else:
-        gy, gx = -2.9000, -79.0000 
-        
+        gy, gx = -2.9000, -79.0000
+
     m = folium.Map(location=[gy, gx], zoom_start=15, tiles='CartoDB positron')
-    
+
     colors = [
         '#0033FF', '#F44336', '#6A0DAD', '#FF9800', '#9C27B0',
         '#00BCD4', '#E91E63', '#3F51B5', '#FFC107', '#795548'
     ]
 
     folium.Marker(
-        [gy, gx], popup="<b>GARAGE (Inicio)</b>", 
+        [gy, gx], popup="<b>GARAGE (Inicio)</b>",
         icon=folium.Icon(color='green', icon='warehouse', prefix='fa')
     ).add_to(m)
-    
+
     if vrp.landfill in G_latlon.nodes:
         ly, lx = G_latlon.nodes[vrp.landfill]['y'], G_latlon.nodes[vrp.landfill]['x']
         folium.Marker(
-            [ly, lx], popup="<b>VERTEDERO (Fin/Descarga)</b>", 
+            [ly, lx], popup="<b>VERTEDERO (Fin/Descarga)</b>",
             icon=folium.Icon(color='black', icon='trash', prefix='fa')
         ).add_to(m)
 
-    features = []
-    base_time = datetime.now()
-    STEP_METERS = 30
-    TIME_INTERVAL_SEC = 1  
-    
-    table_rows = ""
+    STEP_METERS = 25
+    all_routes_js = []
+
+    table_rows       = ""
     total_fleet_dist = 0.0
     total_fleet_load = 0.0
     total_fleet_time = 0.0
-    
+
     for i, route in enumerate(routes):
-        if not route: continue
-        color = colors[i % len(colors)]
-        
+        if not route:
+            all_routes_js.append([])
+            continue
+
+        color        = colors[i % len(colors)]
+        truck_number = i + 1
+
         r_dist, r_load, r_time = calculate_route_metrics(vrp, route)
-        
-        # Calcular carga total recolectada (suma de todos los clientes)
-        route_total_load = sum(vrp.city_graph.nodes[node].get('demand', 0) 
-                               for node in route if node != vrp.landfill)
-        
+        route_total_load = sum(
+            vrp.city_graph.nodes[node].get('demand', 0)
+            for node in route if node != vrp.landfill
+        )
+
         total_fleet_dist += r_dist
         total_fleet_load += route_total_load
         total_fleet_time += r_time
-        
-        row_html = f"""
-        <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 8px;"><span style="color:{color}; font-weight:bold;">⬤ Camión {i+1}</span></td>
-            <td style="padding: 8px;">{route_total_load:.2f} t</td>
-            <td style="padding: 8px;">{r_dist:.2f} km</td>
-            <td style="padding: 8px;">{format_time(r_time)}</td>
-        </tr>
-        """
-        table_rows += row_html
 
+        table_rows += f"""
+        <tr style="border-bottom:1px solid #ddd;">
+            <td style="padding:8px;">
+                <span style="color:{color};font-weight:bold;">🚛 Camión {truck_number}</span>
+            </td>
+            <td style="padding:8px;">{route_total_load:.2f} t</td>
+            <td style="padding:8px;">{r_dist:.2f} km</td>
+            <td style="padding:8px;">{format_time(r_time)}</td>
+        </tr>"""
+
+        # Marcadores estáticos de clientes
         for cust in route:
-            if cust == vrp.landfill:
-                continue 
+            if cust == vrp.landfill or cust not in G_latlon.nodes:
+                continue
+            cy, cx = G_latlon.nodes[cust]['y'], G_latlon.nodes[cust]['x']
+            folium.CircleMarker(
+                [cy, cx], radius=3, color=color, weight=1,
+                fill=True, fill_color='white', fill_opacity=0.7,
+                popup=f"Cliente {cust} (Camión {truck_number})"
+            ).add_to(m)
 
-            if cust in G_latlon.nodes:
-                cy, cx = G_latlon.nodes[cust]['y'], G_latlon.nodes[cust]['x']
-                folium.CircleMarker(
-                    [cy, cx], radius=4, color=color, weight=1, 
-                    fill=True, fill_color='white', fill_opacity=0.7, 
-                    popup=f"Cliente {cust} (Ruta Inicial)"
-                ).add_to(m)
-        
+        # Ruta completa siguiendo calles
         full_path_nodes = []
-        full_path_nodes.extend(vrp.get_path(vrp.garage, route[0])) 
-        
-        for j in range(len(route)-1):
-            path_segment = vrp.get_path(route[j], route[j+1])
-            full_path_nodes.extend(path_segment[1:]) 
-        
+        full_path_nodes.extend(vrp.get_path(vrp.garage, route[0]))
+        for j in range(len(route) - 1):
+            seg = vrp.get_path(route[j], route[j + 1])
+            full_path_nodes.extend(seg[1:])
         if route[-1] != vrp.landfill:
-            full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:]) 
-        
-        raw_coords = [(G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x']) 
-                      for n in full_path_nodes if n in G_latlon.nodes]
-        
-        #folium.PolyLine(raw_coords, color=color, weight=2, opacity=0.4).add_to(m)
+            full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:])
 
-        smooth_coords = densify_path(raw_coords, step_meters=STEP_METERS)
-        curr_t = base_time
+        raw_coords = [
+            (G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x'])
+            for n in full_path_nodes if n in G_latlon.nodes
+        ]
 
-        for c in smooth_coords:
-            features.append({
-                'type': 'Feature',
-                'geometry': {'type': 'Point', 'coordinates': [c[1], c[0]]}, 
-                'properties': {
-                    'time': curr_t.isoformat(),
-                    'icon': 'circle',
-                    'iconstyle': {
-                        'fillColor': color, 'fillOpacity': 1, 'stroke': 'false',
-                        'radius': 5
-                    },
-                    'style': {'color': color,
-                              'weight': 2,
-                              'opacity': 0.25
-                              }
-                }
-            })
+        smooth = densify_path(raw_coords, step_meters=STEP_METERS)
+        all_routes_js.append([[c[0], c[1]] for c in smooth])
 
-            curr_t += timedelta(seconds=TIME_INTERVAL_SEC)
+    # ── Serializar a JSON ─────────────────────────────────────────────────────
+    import json
+    routes_json = json.dumps(all_routes_js)
+    colors_json = json.dumps([colors[i % len(colors)] for i in range(len(routes))])
+    names_json  = json.dumps([f"Camión {i+1}" for i in range(len(routes))])
+    map_var     = m.get_name()
 
+    # ── JavaScript animación ──────────────────────────────────────────────────
+    js_code = f"""
+    <script>
+    (function() {{
+        var checkMap = setInterval(function() {{
+            if (typeof {map_var} === 'undefined') return;
+            clearInterval(checkMap);
+
+            var routesData  = {routes_json};
+            var routeColors = {colors_json};
+            var routeNames  = {names_json};
+
+            var SPEED   = 1;
+            var FPS     = 12;
+            var playing = true;
+
+            var markers     = [];
+            var polylines   = [];
+            var stepIndex   = [];
+            var trailCoords = [];
+
+            function truckIcon(color) {{
+                var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">'
+                    + '<rect x="2"  y="12" width="22" height="14" rx="2" fill="' + color + '" stroke="white" stroke-width="1.5"/>'
+                    + '<rect x="24" y="16" width="10" height="10" rx="2" fill="' + color + '" stroke="white" stroke-width="1.5"/>'
+                    + '<circle cx="8"  cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<circle cx="20" cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<circle cx="30" cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<rect x="4" y="14" width="8" height="6" rx="1" fill="rgba(255,255,255,0.35)"/>'
+                    + '</svg>';
+                return L.divIcon({{
+                    html: '<div style="transform:translate(-18px,-18px)">' + svg + '</div>',
+                    iconSize:   [36, 36],
+                    iconAnchor: [18, 18],
+                    className:  ''
+                }});
+            }}
+
+            // Inicializar marcadores y polylines
+            for (var i = 0; i < routesData.length; i++) {{
+                if (!routesData[i] || routesData[i].length === 0) {{
+                    markers.push(null);
+                    polylines.push(null);
+                    stepIndex.push(0);
+                    trailCoords.push([]);
+                    continue;
+                }}
+                var start = routesData[i][0];
+
+                var mk = L.marker(start, {{ icon: truckIcon(routeColors[i]) }})
+                          .bindTooltip(routeNames[i], {{
+                              permanent:  true,
+                              direction:  'right',
+                              offset:     [15, -10],
+                              className:  'truck-label'
+                          }})
+                          .addTo({map_var});
+                markers.push(mk);
+
+                var pl = L.polyline([], {{
+                    color:   routeColors[i],
+                    weight:  2.5,
+                    opacity: 0.8
+                }}).addTo({map_var});
+                polylines.push(pl);
+
+                stepIndex.push(0);
+                trailCoords.push([start]);
+            }}
+
+            function resetAll() {{
+                for (var i = 0; i < routesData.length; i++) {{
+                    if (!routesData[i] || routesData[i].length === 0) continue;
+                    stepIndex[i]   = 0;
+                    trailCoords[i] = [routesData[i][0]];
+                    polylines[i].setLatLngs([]);
+                    markers[i].setLatLng(routesData[i][0]);
+                }}
+                document.getElementById('vrp-progress').value = 0;
+                document.getElementById('vrp-pct').innerText  = '0%';
+            }}
+
+            function animate() {{
+                if (!playing) return;
+
+                var allDone = true;
+                for (var i = 0; i < routesData.length; i++) {{
+                    if (!routesData[i] || routesData[i].length === 0) continue;
+                    var total = routesData[i].length;
+                    var idx   = stepIndex[i];
+                    if (idx < total) allDone = false;
+                    if (idx >= total) continue;
+
+                    var pos = routesData[i][idx];
+                    markers[i].setLatLng(pos);
+                    trailCoords[i].push(pos);
+                    polylines[i].setLatLngs(trailCoords[i]);
+                    stepIndex[i] = Math.min(idx + SPEED, total);
+                }}
+
+                // Actualizar barra de progreso (promedio de todos los camiones)
+                var total_pct = 0;
+                var cnt = 0;
+                for (var i = 0; i < routesData.length; i++) {{
+                    if (routesData[i] && routesData[i].length > 0) {{
+                        total_pct += (stepIndex[i] / routesData[i].length) * 100;
+                        cnt++;
+                    }}
+                }}
+                var pct = cnt > 0 ? total_pct / cnt : 0;
+                document.getElementById('vrp-progress').value = pct;
+                document.getElementById('vrp-pct').innerText  = Math.round(pct) + '%';
+
+                if (allDone) {{
+                    resetAll();
+                }}
+            }}
+
+            setInterval(animate, 1000 / FPS);
+
+            // ── Controles ────────────────────────────────────────────────────
+            document.getElementById('vrp-playpause').onclick = function() {{
+                playing = !playing;
+                this.innerText = playing ? '⏸️  Pausa' : '▶️  Play';
+                this.style.background = playing ? '#4CAF50' : '#FF9800';
+            }};
+
+            document.getElementById('vrp-restart').onclick = function() {{
+                resetAll();
+                playing = true;
+                document.getElementById('vrp-playpause').innerText  = '⏸️  Pausa';
+                document.getElementById('vrp-playpause').style.background = '#4CAF50';
+            }};
+
+            document.getElementById('vrp-speed').oninput = function() {{
+                SPEED = parseInt(this.value);
+                document.getElementById('vrp-speed-label').innerText = 'x' + SPEED;
+            }};
+        }}, 200);
+    }})();
+    </script>
+
+    <style>
+    .truck-label {{
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        font-weight: bold;
+        font-size: 12px;
+        color: #222;
+        text-shadow: 1px 1px 2px white, -1px -1px 2px white;
+    }}
+    </style>
+    """
+
+    # ── Panel de controles HTML ───────────────────────────────────────────────
+    controls_html = """
+    <div id="vrp-controls" style="
+        position: fixed;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+        background: rgba(25,25,25,0.93);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 35px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-family: 'Roboto', sans-serif;
+        font-size: 13px;
+        box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+        white-space: nowrap;
+    ">
+        <button id="vrp-playpause" style="
+            background:#4CAF50; color:white; border:none;
+            border-radius:20px; padding:7px 16px;
+            cursor:pointer; font-size:13px; font-weight:bold;
+            transition: background 0.2s;">
+            ⏸️  Pausa
+        </button>
+
+        <button id="vrp-restart" style="
+            background:#2196F3; color:white; border:none;
+            border-radius:20px; padding:7px 16px;
+            cursor:pointer; font-size:13px; font-weight:bold;">
+            ↺  Reiniciar
+        </button>
+
+        <span style="opacity:0.7;">Progreso:</span>
+        <input id="vrp-progress" type="range" min="0" max="100" value="0"
+               style="width:140px; accent-color:#4CAF50; cursor:default;"
+               readonly>
+        <span id="vrp-pct" style="min-width:34px; text-align:right; font-weight:bold;">0%</span>
+
+        <span style="opacity:0.7; margin-left:6px;">Velocidad:</span>
+        <input id="vrp-speed" type="range" min="1" max="10" value="1"
+               style="width:80px; accent-color:#FF9800;">
+        <span id="vrp-speed-label" style="min-width:28px; font-weight:bold;">x1</span>
+    </div>
+    """
+
+    # ── Tabla resumen ─────────────────────────────────────────────────────────
     html_table = f"""
     <div style="
-        position: fixed; top: 50px; left: 50px; width: 350px;
-        background-color: white; z-index:9999; border-radius: 8px; 
-        box-shadow: 0 0 15px rgba(0,0,0,0.2); font-family: 'Roboto', sans-serif; 
-        font-size: 13px; overflow: hidden;">
-        
-        <div style="background-color: #B71C1C; color: white; padding: 10px; text-align: center;">
-            <h4 style="margin: 0;">SOLUCIÓN INICIAL</h4>
+        position:fixed; top:50px; left:50px; width:350px;
+        background:white; z-index:9999; border-radius:8px;
+        box-shadow:0 0 15px rgba(0,0,0,0.2);
+        font-family:'Roboto',sans-serif; font-size:13px; overflow:hidden;">
+
+        <div style="background:#B71C1C;color:white;padding:10px;text-align:center;">
+            <h4 style="margin:0;">SOLUCIÓN INICIAL</h4>
             <small>Estado Aleatorio (Sin Optimizar)</small>
         </div>
-        
-        <table style="width: 100%; border-collapse: collapse;">
+
+        <table style="width:100%;border-collapse:collapse;">
             <thead>
-                <tr style="background-color: #f2f2f2; text-align: left;">
-                    <th style="padding: 8px;">Vehículo</th>
-                    <th style="padding: 8px;">Carga</th>
-                    <th style="padding: 8px;">Dist.</th>
-                    <th style="padding: 8px;">Tiempo</th>
+                <tr style="background:#f2f2f2;text-align:left;">
+                    <th style="padding:8px;">Vehículo</th>
+                    <th style="padding:8px;">Carga</th>
+                    <th style="padding:8px;">Dist.</th>
+                    <th style="padding:8px;">Tiempo</th>
                 </tr>
             </thead>
             <tbody>
                 {table_rows}
-                <tr style="background-color: #ffebee; font-weight: bold; border-top: 2px solid #ccc;">
-                    <td style="padding: 8px;">TOTAL</td>
-                    <td style="padding: 8px;">{total_fleet_load:.2f} t</td>
-                    <td style="padding: 8px;">{total_fleet_dist:.2f} km</td>
-                    <td style="padding: 8px;">{format_time(total_fleet_time)}</td>
+                <tr style="background:#ffebee;font-weight:bold;border-top:2px solid #ccc;">
+                    <td style="padding:8px;">TOTAL</td>
+                    <td style="padding:8px;">{total_fleet_load:.2f} t</td>
+                    <td style="padding:8px;">{total_fleet_dist:.2f} km</td>
+                    <td style="padding:8px;">{format_time(total_fleet_time)}</td>
                 </tr>
             </tbody>
         </table>
     </div>
     """
-    
+
     m.get_root().html.add_child(folium.Element(html_table))
-
-    if features:
-        TimestampedGeoJson(
-            {'type': 'FeatureCollection', 'features': features},
-            period=f'PT{TIME_INTERVAL_SEC}S',
-            #duration=f'PT{TIME_INTERVAL_SEC}S',
-            duration='PT9999S',
-            transition_time=100,
-            auto_play=True,
-            loop=True,
-            max_speed=20,
-            add_last_point=False 
-        ).add_to(m)
-
+    m.get_root().html.add_child(folium.Element(controls_html))
+    m.get_root().html.add_child(folium.Element(js_code))
     folium.LayerControl().add_to(m)
     m.save(filename)
     print(f"[OK] Mapa Inicial guardado: {filename}")
 
+
 def export_routes_to_html(vrp, routes, filename="rutas_optimizadas.html"):
     print(f"\nGenerando mapa interactivo UNIFICADO (Multi-Trip): {filename}...")
-    
+
     try:
         G_latlon = ox.project_graph(vrp.city_graph, to_crs='epsg:4326')
     except:
@@ -1338,18 +1869,9 @@ def export_routes_to_html(vrp, routes, filename="rutas_optimizadas.html"):
     if vrp.garage in G_latlon.nodes:
         gy, gx = G_latlon.nodes[vrp.garage]['y'], G_latlon.nodes[vrp.garage]['x']
     else:
-        # Fallback a coordenadas reales si el nodo de proj fallo
-        gy, gx = -2.876, -78.989 
-        
+        gy, gx = -2.876, -78.989
+
     m = folium.Map(location=[gy, gx], zoom_start=15, tiles='CartoDB positron')
-    
-    # CSS para ocultar controles de tiempo duplicados (solo mostrar el último agregado)
-    m.get_root().html.add_child(folium.Element("""
-        <style>
-            .leaflet-control-timecontrol { display: none; }
-            .leaflet-control-timecontrol:last-child { display: block; }
-        </style>
-    """))
 
     colors = [
         '#0033FF', '#F44336', '#6A0DAD', '#FF9800', '#9C27B0',
@@ -1357,226 +1879,351 @@ def export_routes_to_html(vrp, routes, filename="rutas_optimizadas.html"):
     ]
 
     folium.Marker(
-        [gy, gx], popup="<b>GARAGE (Inicio)</b>", 
+        [gy, gx], popup="<b>GARAGE (Inicio)</b>",
         icon=folium.Icon(color='green', icon='warehouse', prefix='fa')
     ).add_to(m)
-    
+
     if vrp.landfill in G_latlon.nodes:
         ly, lx = G_latlon.nodes[vrp.landfill]['y'], G_latlon.nodes[vrp.landfill]['x']
         folium.Marker(
-            [ly, lx], popup="<b>VERTEDERO (Fin/Descarga)</b>", 
+            [ly, lx], popup="<b>VERTEDERO (Fin/Descarga)</b>",
             icon=folium.Icon(color='black', icon='trash', prefix='fa')
         ).add_to(m)
 
-    # features = []  <-- ELIMINADO: Ya no acumulamos globalmente
-    base_time = datetime.now()
-    STEP_METERS = 20       
-    TIME_INTERVAL_SEC = 1  
-    
-    table_rows = ""
+    STEP_METERS = 20
+
+    table_rows       = ""
     total_fleet_dist = 0.0
     total_fleet_load = 0.0
     total_fleet_time = 0.0
-    
-    for i, route in enumerate(routes):
-        if not route: continue
-        
-        features_route = [] # Lista local para esta ruta
-        color = colors[i % len(colors)]
+    all_routes_js    = []
 
-        # --- MODIFICACIÓN: Crear grupo de características para mostrar/ocultar ruta ---
-        route_fg = folium.FeatureGroup(name=f"Camión {i+1}", show=True)
-        # -----------------------------------------------------------------------------
-        
+    for i, route in enumerate(routes):
+        if not route:
+            all_routes_js.append([])
+            continue
+
+        color        = colors[i % len(colors)]
+        truck_number = i + 1
+
+        # ── FeatureGroup para activar/desactivar desde LayerControl ──────────
+        route_fg = folium.FeatureGroup(name=f"Camión {truck_number}", show=True)
+
         r_dist, r_load, r_time = calculate_route_metrics(vrp, route)
-        
-        # Calcular carga total recolectada (suma de todos los clientes)
-        route_total_load = sum(vrp.city_graph.nodes[node].get('demand', 0) 
-                               for node in route if node != vrp.landfill)
-        
+        route_total_load = sum(
+            vrp.city_graph.nodes[node].get('demand', 0)
+            for node in route if node != vrp.landfill
+        )
         total_fleet_dist += r_dist
         total_fleet_load += route_total_load
         total_fleet_time += r_time
-        
-        row_html = f"""
-        <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 8px;"><span style="color:{color}; font-weight:bold;">⬤ Camión {i+1}</span></td>
-            <td style="padding: 8px;">{route_total_load:.2f} ton</td>
-            <td style="padding: 8px;">{r_dist:.2f} km</td>
-            <td style="padding: 8px;">{format_time(r_time)}</td>
-        </tr>
-        """
-        table_rows += row_html
 
+        table_rows += f"""
+        <tr style="border-bottom:1px solid #ddd;">
+            <td style="padding:8px;">
+                <span style="color:{color};font-weight:bold;">🚛 Camión {truck_number}</span>
+            </td>
+            <td style="padding:8px;">{route_total_load:.2f} ton</td>
+            <td style="padding:8px;">{r_dist:.2f} km</td>
+            <td style="padding:8px;">{format_time(r_time)}</td>
+        </tr>"""
+
+        # Marcadores de clientes y descargas intermedias
         for cust in route:
             if cust == vrp.landfill:
                 if vrp.landfill in G_latlon.nodes:
-                    ly, lx = G_latlon.nodes[vrp.landfill]['y'], G_latlon.nodes[vrp.landfill]['x']
+                    ly2, lx2 = G_latlon.nodes[vrp.landfill]['y'], G_latlon.nodes[vrp.landfill]['x']
                     folium.Marker(
-                        [ly, lx], 
-                        popup=f"<b>Camión {i+1}:</b> Descarga Intermedia", 
+                        [ly2, lx2],
+                        popup=f"<b>Camión {truck_number}:</b> Descarga Intermedia",
                         icon=folium.Icon(color='gray', icon='refresh', prefix='fa')
                     ).add_to(route_fg)
-                continue 
-
+                continue
+            """if cust in G_latlon.nodes:
+                cy, cx = G_latlon.nodes[cust]['y'], G_latlon.nodes[cust]['x']
+                folium.CircleMarker(
+                    [cy, cx], radius=6, color=color, weight=3,
+                    fill=True, fill_color='white', fill_opacity=1,
+                    popup=f"Cliente {cust}<br>Camión {truck_number}"
+                ).add_to(route_fg)"""
             if cust in G_latlon.nodes:
                 cy, cx = G_latlon.nodes[cust]['y'], G_latlon.nodes[cust]['x']
                 folium.CircleMarker(
-                    [cy, cx], radius=6, color=color, weight=3, 
-                    fill=True, fill_color='white', fill_opacity=1, 
-                    popup=f"Cliente {cust}<br>Camión {i+1}"
+                    [cy, cx], radius=2, color=color, weight=1,
+                    fill=True, fill_color=color, fill_opacity=0.4,
+                    popup=f"Cliente {cust}<br>Camión {truck_number}"
                 ).add_to(route_fg)
-        
+
+        # Ruta completa siguiendo calles
         full_path_nodes = []
-        
-        full_path_nodes.extend(vrp.get_path(vrp.garage, route[0])) 
-        
-        for j in range(len(route)-1):
-            path_segment = vrp.get_path(route[j], route[j+1])
-            full_path_nodes.extend(path_segment[1:]) 
-        
-        
+        full_path_nodes.extend(vrp.get_path(vrp.garage, route[0]))
+        for j in range(len(route) - 1):
+            seg = vrp.get_path(route[j], route[j + 1])
+            full_path_nodes.extend(seg[1:])
         if route[-1] != vrp.landfill:
-            full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:]) 
-        
-        raw_coords = [(G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x']) 
-                      for n in full_path_nodes if n in G_latlon.nodes]
-        
-        raw_coords = [(G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x']) 
-                      for n in full_path_nodes if n in G_latlon.nodes]
-        
-        folium.PolyLine(raw_coords, color=color, weight=3, opacity=0.5).add_to(route_fg)
-        
-        # --- MODIFICACION: Linea punteada de RETORNO (Landfill -> Garage) ---
-        # Aseguramos que siempre se dibuje la linea de retorno desde el Landfill hasta el Garage
-        # Esto representa visualmente el fin del turno.
-        
-        return_path = vrp.get_path(vrp.landfill, vrp.garage)
-        
-        # OJO: Si el camion NO termino en el landfill (ej. termino en cliente -> landfill -> garage)
-        # La logica de full_path_nodes arriba YA incluyo el tramo hasta el Landfill (linea 411).
-        # Entonces solo falta Landfill -> Garage.
-        
-        return_coords = [(G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x']) 
-                         for n in return_path if n in G_latlon.nodes]
-        
-        #folium.PolyLine(return_coords, color=color, weight=2, opacity=0.6, dash_array='5, 10', popup="Retorno a Garage").add_to(route_fg)
-        
-        # --- FIX: Agregar el retorno a la animacion tambien ---
+            full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:])
+
+        raw_coords = [
+            (G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x'])
+            for n in full_path_nodes if n in G_latlon.nodes
+        ]
+
+        # Línea estática de la ruta
+        """
+        folium.PolyLine(
+            raw_coords, color=color, weight=3, opacity=0.5,
+            tooltip=f"Camión {truck_number}"
+        ).add_to(route_fg)"""
+
+        # Retorno landfill → garage
+        return_path   = vrp.get_path(vrp.landfill, vrp.garage)
+        return_coords = [
+            (G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x'])
+            for n in return_path if n in G_latlon.nodes
+        ]
         raw_coords.extend(return_coords)
-        # ----------------------------------------------------
-        # --------------------------------------------------------------------
-        
-        # (MOVIDO MÁS ABAJO) route_fg.add_to(m)
-        
-        smooth_coords = densify_path(raw_coords, step_meters=STEP_METERS)
-        curr_t = base_time
-        
-        for c in smooth_coords:
-            features_route.append({
-                'type': 'Feature',
-                'geometry': {'type': 'Point', 'coordinates': [c[1], c[0]]}, 
-                'properties': {
-                    'time': curr_t.isoformat(),
-                    'icon': 'circle',
-                    'iconstyle': {
-                        'fillColor': color, 'fillOpacity': 1, 'stroke': 'true', 
-                        'color': 'black', 'weight': 1, 'radius': 6
-                    },
-                    'style': {'color': color,
-                              'weight': 2,
-                              'opacity': 0.25
-                              }
-                }
-            })
 
-            curr_t += timedelta(seconds=TIME_INTERVAL_SEC)
-            
-        if features_route:
-            tgj = TimestampedGeoJson(
-                {'type': 'FeatureCollection', 'features': features_route},
-                period=f'PT{TIME_INTERVAL_SEC}S',
-                #duration=f'PT{TIME_INTERVAL_SEC}S',
-                duration='PT9999S',
-                transition_time=100,
-                auto_play=False,
-                loop=True,
-                max_speed=20,
-                loop_button=True,
-                time_slider_drag_update=True,
-                add_last_point=False 
-            )
-            tgj.add_to(m)
-
-            # Sincronización JS: Ligar la visibilidad de la animación (tgj) a la del grupo de ruta (route_fg)
-            m_id = m.get_name()
-            fg_id = route_fg.get_name()
-            tgj_id = tgj.get_name()
-
-            bind_script = f"""
-            <script>
-                {m_id}.on('overlayadd', function(e) {{
-                    if (e.layer === {fg_id}) {{
-                        {tgj_id}.addTo({m_id});
-                    }}
-                }});
-                {m_id}.on('overlayremove', function(e) {{
-                    if (e.layer === {fg_id}) {{
-                        {m_id}.removeLayer({tgj_id});
-                    }}
-                }});
-            </script>
-            """
-            m.get_root().html.add_child(folium.Element(bind_script))
-
-        # Agregar el grupo de la ruta al mapa
         route_fg.add_to(m)
 
+        # Coordenadas densificadas para la animación JS
+        smooth = densify_path(raw_coords, step_meters=STEP_METERS)
+        all_routes_js.append([[c[0], c[1]] for c in smooth])
+
+    # ── Serializar a JSON ─────────────────────────────────────────────────────
+    import json
+    routes_json = json.dumps(all_routes_js)
+    colors_json = json.dumps([colors[i % len(colors)] for i in range(len(routes))])
+    names_json  = json.dumps([f"Camión {i+1}" for i in range(len(routes))])
+    map_var     = m.get_name()
+
+    # Generar barras de control: una por camión
+    control_bars = ""
+    for i in range(len(routes)):
+        color = colors[i % len(colors)]
+        control_bars += f"""
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 10px;
+                    background:rgba(255,255,255,0.07);border-radius:6px;">
+            <span style="font-size:18px;">🚛</span>
+            <span style="color:{color};font-weight:bold;min-width:75px;">
+                Camión {i+1}
+            </span>
+            <button onclick="seekTruck({i},-100)"
+                style="background:none;border:none;color:white;
+                       font-size:16px;cursor:pointer;padding:2px 5px;">⏮️</button>
+            <button id="btn-{i}" onclick="toggleTruck({i})"
+                style="background:none;border:none;color:white;
+                       font-size:16px;cursor:pointer;padding:2px 5px;">⏸️</button>
+            <button onclick="seekTruck({i},100)"
+                style="background:none;border:none;color:white;
+                       font-size:16px;cursor:pointer;padding:2px 5px;">⏭️</button>
+            <input id="bar-{i}" type="range" min="0" max="1000" value="0"
+                   oninput="scrubTruck({i},this.value)"
+                   style="flex:1;accent-color:{color};cursor:pointer;">
+            <span style="opacity:0.7;font-size:11px;">vel:</span>
+            <input id="spd-{i}" type="range" min="1" max="5" value="1"
+                   oninput="setSpeed({i},this.value)"
+                   style="width:55px;accent-color:#FF9800;">
+            <span id="spd-label-{i}"
+                  style="min-width:28px;font-size:12px;color:#FF9800;">x1</span>
+        </div>"""
+
+    # ── JavaScript animación ──────────────────────────────────────────────────
+    js_code = f"""
+    <script>
+    (function() {{
+        var checkMap = setInterval(function() {{
+            if (typeof {map_var} === 'undefined') return;
+            clearInterval(checkMap);
+
+            var routesData  = {routes_json};
+            var routeColors = {colors_json};
+            var routeNames  = {names_json};
+            var N           = routesData.length;
+            var FPS         = 12;
+
+            var markers     = new Array(N).fill(null);
+            var polylines   = new Array(N).fill(null);
+            var stepIndex   = new Array(N).fill(0);
+            var trailCoords = new Array(N).fill(null).map(function(){{ return []; }});
+            var playing     = new Array(N).fill(true);
+            var speed       = new Array(N).fill(1);
+
+            function truckIcon(color) {{
+                var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">'
+                    + '<rect x="2"  y="12" width="22" height="14" rx="2" fill="' + color + '" stroke="white" stroke-width="1.5"/>'
+                    + '<rect x="24" y="16" width="10" height="10" rx="2" fill="' + color + '" stroke="white" stroke-width="1.5"/>'
+                    + '<circle cx="8"  cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<circle cx="20" cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<circle cx="30" cy="27" r="3" fill="white" stroke="' + color + '" stroke-width="1.5"/>'
+                    + '<rect x="4" y="14" width="8" height="6" rx="1" fill="rgba(255,255,255,0.35)"/>'
+                    + '</svg>';
+                return L.divIcon({{
+                    html: '<div style="transform:translate(-18px,-18px)">' + svg + '</div>',
+                    iconSize: [36,36], iconAnchor: [18,18], className: ''
+                }});
+            }}
+
+            for (var i = 0; i < N; i++) {{
+                if (!routesData[i] || routesData[i].length === 0) continue;
+                var start = routesData[i][0];
+
+                markers[i] = L.marker(start, {{ icon: truckIcon(routeColors[i]) }})
+                    .bindTooltip(routeNames[i], {{
+                        permanent: true, direction: 'right',
+                        offset: [15,-10], className: 'truck-label'
+                    }})
+                    .addTo({map_var});
+
+                polylines[i] = L.polyline([], {{
+                    color: routeColors[i], weight: 2.5, opacity: 0.85
+                }}).addTo({map_var});
+
+                trailCoords[i] = [start];
+            }}
+
+            function updateBar(i) {{
+                if (!routesData[i] || routesData[i].length === 0) return;
+                var bar = document.getElementById('bar-' + i);
+                if (bar) bar.value = (stepIndex[i] / routesData[i].length) * 1000;
+            }}
+
+            window.toggleTruck = function(i) {{
+                playing[i] = !playing[i];
+                var btn = document.getElementById('btn-' + i);
+                if (btn) btn.innerText = playing[i] ? '⏸️' : '▶️';
+            }};
+
+            window.seekTruck = function(i, delta) {{
+                if (!routesData[i]) return;
+                stepIndex[i] = Math.max(0, Math.min(routesData[i].length, stepIndex[i] + delta));
+                trailCoords[i] = routesData[i].slice(0, stepIndex[i]);
+                if (polylines[i]) polylines[i].setLatLngs(trailCoords[i]);
+                if (markers[i] && trailCoords[i].length > 0)
+                    markers[i].setLatLng(trailCoords[i][trailCoords[i].length - 1]);
+                updateBar(i);
+            }};
+
+            window.scrubTruck = function(i, val) {{
+                if (!routesData[i]) return;
+                stepIndex[i] = Math.floor((val / 1000) * routesData[i].length);
+                trailCoords[i] = routesData[i].slice(0, stepIndex[i]);
+                if (polylines[i]) polylines[i].setLatLngs(trailCoords[i]);
+                if (markers[i] && trailCoords[i].length > 0)
+                    markers[i].setLatLng(trailCoords[i][trailCoords[i].length - 1]);
+            }};
+
+            window.setSpeed = function(i, val) {{
+                speed[i] = parseInt(val);
+                var lbl = document.getElementById('spd-label-' + i);
+                if (lbl) lbl.innerText = 'x' + val;
+            }};
+
+            function animate() {{
+                for (var i = 0; i < N; i++) {{
+                    if (!routesData[i] || routesData[i].length === 0) continue;
+                    if (!playing[i]) continue;
+
+                    var total = routesData[i].length;
+                    var idx   = stepIndex[i];
+
+                    if (idx >= total) {{
+                        stepIndex[i]   = 0;
+                        trailCoords[i] = [routesData[i][0]];
+                        polylines[i].setLatLngs([]);
+                        markers[i].setLatLng(routesData[i][0]);
+                        updateBar(i);
+                        continue;
+                    }}
+
+                    var pos = routesData[i][idx];
+                    markers[i].setLatLng(pos);
+                    trailCoords[i].push(pos);
+                    polylines[i].setLatLngs(trailCoords[i]);
+                    stepIndex[i] = Math.min(idx + speed[i], total);
+                    updateBar(i);
+                }}
+            }}
+
+            setInterval(animate, 1000 / FPS);
+        }}, 200);
+    }})();
+    </script>
+
+    <style>
+    .truck-label {{
+        background:  transparent !important;
+        border:      none        !important;
+        box-shadow:  none        !important;
+        font-weight: bold;
+        font-size:   12px;
+        color:       #111;
+        text-shadow: 1px 1px 2px white, -1px -1px 2px white;
+    }}
+    </style>
+    """
+
+    # ── Panel de controles (una barra por camión) ─────────────────────────────
+    controls_html = f"""
+    <div style="
+        position:fixed; bottom:0; left:0; right:0;
+        z-index:9999;
+        background:rgba(20,20,20,0.93);
+        color:white;
+        padding:8px 16px;
+        font-family:'Roboto',sans-serif;
+        font-size:13px;
+        display:flex;
+        flex-direction:column;
+        gap:5px;
+        box-shadow:0 -3px 12px rgba(0,0,0,0.4);">
+        {control_bars}
+    </div>
+    """
+
+    # ── Tabla resumen ─────────────────────────────────────────────────────────
     html_table = f"""
     <div style="
-        position: fixed; bottom: 50px; right: 50px; width: 350px;
-        background-color: white; z-index:9999; border-radius: 8px; 
-        box-shadow: 0 0 15px rgba(0,0,0,0.2); font-family: 'Roboto', sans-serif; 
-        font-size: 13px; overflow: hidden;">
-        
-        <div style="background-color: #333; color: white; padding: 10px; text-align: center;">
-            <h4 style="margin: 0;">Resumen VRP (Multi-Trip)</h4>
-            <small>Optimización de Flota Reducida</small>
+        position:fixed; bottom:calc({len(routes)} * 52px + 20px); right:50px;
+        width:370px; background:white; z-index:9999; border-radius:8px;
+        box-shadow:0 0 15px rgba(0,0,0,0.2);
+        font-family:'Roboto',sans-serif; font-size:13px; overflow:hidden;">
+
+        <div style="background:#333;color:white;padding:10px;text-align:center;">
+            <h4 style="margin:0;">Rutas Optimizadas (Multi-Trip)</h4>
+            <small>Solución Final del Algoritmo Genético</small>
         </div>
-        
-        <table style="width: 100%; border-collapse: collapse;">
+
+        <table style="width:100%;border-collapse:collapse;">
             <thead>
-                <tr style="background-color: #f2f2f2; text-align: left;">
-                    <th style="padding: 8px;">Vehículo</th>
-                    <th style="padding: 8px;">Carga Total</th>
-                    <th style="padding: 8px;">Dist.</th>
-                    <th style="padding: 8px;">Turno</th>
+                <tr style="background:#f2f2f2;text-align:left;">
+                    <th style="padding:8px;">Vehículo</th>
+                    <th style="padding:8px;">Carga Total</th>
+                    <th style="padding:8px;">Dist.</th>
+                    <th style="padding:8px;">Turno</th>
                 </tr>
             </thead>
             <tbody>
                 {table_rows}
-                <tr style="background-color: #e8f5e9; font-weight: bold; border-top: 2px solid #ccc;">
-                    <td style="padding: 8px;">TOTAL FLOTA</td>
-                    <td style="padding: 8px;">{total_fleet_load:.2f} t</td>
-                    <td style="padding: 8px;">{total_fleet_dist:.2f} km</td>
-                    <td style="padding: 8px;">{format_time(total_fleet_time)}</td>
+                <tr style="background:#e8f5e9;font-weight:bold;border-top:2px solid #ccc;">
+                    <td style="padding:8px;">TOTAL FLOTA</td>
+                    <td style="padding:8px;">{total_fleet_load:.2f} t</td>
+                    <td style="padding:8px;">{total_fleet_dist:.2f} km</td>
+                    <td style="padding:8px;">{format_time(total_fleet_time)}</td>
                 </tr>
-                <!-- Nueva fila de Indice de Eficiencia -->
-                 <tr style="background-color: #fff3e0; font-weight: bold; border-top: 1px dashed #ccc;">
-                    <td style="padding: 8px;">CALIFICACIÓN</td>
-                    <td colspan="3" style="padding: 8px; text-align: center; color: #E65100;">
-                        Indice: {(total_fleet_load / total_fleet_dist if total_fleet_dist > 0 else 0):.4f} t/km
+                <tr style="background:#fff3e0;font-weight:bold;border-top:1px dashed #ccc;">
+                    <td style="padding:8px;">CALIFICACIÓN</td>
+                    <td colspan="3" style="padding:8px;text-align:center;color:#E65100;">
+                        Índice: {(total_fleet_load / total_fleet_dist if total_fleet_dist > 0 else 0):.4f} t/km
                     </td>
                 </tr>
             </tbody>
         </table>
     </div>
     """
-    
+
     m.get_root().html.add_child(folium.Element(html_table))
-
-    # (ELIMINADO: Bloque TimestampedGeoJson global)
-
+    m.get_root().html.add_child(folium.Element(controls_html))
+    m.get_root().html.add_child(folium.Element(js_code))
     folium.LayerControl().add_to(m)
     m.save(filename)
     print(f"[OK] Mapa Multi-Trip guardado: {filename}")
@@ -1990,12 +2637,16 @@ def export_routes_to_geopackage(vrp_system, solution,
         import traceback
         traceback.print_exc()
 
+"""
 if __name__ == "__main__":
     random.seed(42)
     vrp = VRPSystem()
     
     print(f"\nOptimizando {len(vrp.customers)} clientes con GA...")
-    
+
+    CONFIG['MAX_SHIFT_TIME'] = 10.0   # Amplía un poco el turno si es necesario
+    N_TRUCKS = 2
+
     # Población mixta: 20% heurística (NN), 80% aleatoria
     nn_count = int(CONFIG['POPULATION_SIZE'] * 0.2)
     random_count = CONFIG['POPULATION_SIZE'] - nn_count
@@ -2014,6 +2665,9 @@ if __name__ == "__main__":
         pop.append(create_individual(vrp.customers))
 
     print("Capturando estado inicial (antes de optimizar)...")
+
+
+    
     initial_chromosome = pop[0]
     _, initial_routes_structure = evaluate_chromosome(initial_chromosome, vrp)
     export_initial_solution_to_html(vrp, initial_routes_structure, filename="solucion_inicial.html")
@@ -2025,13 +2679,18 @@ if __name__ == "__main__":
     print_detailed_solution_analysis(vrp, initial_routes_structure, 
                                  title="SOLUCIÓN INICIAL (SIN OPTIMIZAR)")
 
+    _, initial_routes = evaluate_chromosome(pop[0], vrp, n_trucks=N_TRUCKS)
+    export_initial_solution_to_html(vrp, initial_routes, "solucion_inicial.html")
+    print_detailed_solution_analysis(vrp, initial_routes, "SOLUCIÓN INICIAL")
+
     best_fitness = float('inf') 
     best_sol = []
     
     for gen in range(CONFIG['GENERATIONS']):
         scored = []
         for ind in pop:
-            fitness, r = evaluate_chromosome(ind, vrp)
+            fitness, r = evaluate_chromosome(ind, vrp, n_trucks=N_TRUCKS)
+            #fitness, r = evaluate_chromosome(ind, vrp)
             scored.append((fitness, ind, r))
             
             if fitness < best_fitness:
@@ -2039,14 +2698,13 @@ if __name__ == "__main__":
                 best_sol = r
         
         scored.sort(key=lambda x: x[0])
-        
         elite = [s[1] for s in scored[:10]]
         new_pop = elite[:]
+
         while len(new_pop) < CONFIG['POPULATION_SIZE']:
             p1 = random.choice(scored[:30])[1]
             p2 = random.choice(scored[:30])[1]
             child = ordered_crossover(p1, p2)
-            
             # Aplicar mutación: 50% swap, 50% inversion (2-opt)
             if random.random() < 0.5:
                 child = mutate(child)  # Swap mutation
@@ -2057,7 +2715,9 @@ if __name__ == "__main__":
         pop = new_pop
         
         if gen % 50 == 0:
-            print(f"Gen {gen} | Fitness (Score): {best_fitness:.2f}")
+            print(f"Gen {gen} | Fitness: {best_fitness:.2f} | Rutas: {len(best_sol)}")
+
+    assert len(best_sol) <= N_TRUCKS, f"[ERROR] Se generaron {len(best_sol)} rutas, esperadas {N_TRUCKS}"
 
     print("\n" + "="*60)
     print(f"       RESULTADOS FINALES REALES (Fitness GA: {best_fitness:.2f})")
@@ -2119,5 +2779,150 @@ if __name__ == "__main__":
     print("PROCESO FINALIZADO - ARCHIVOS GENERADOS:")
     print("="*70)
     print("1. rutas_optimizadas.html - Visualización web animada")
+    print("2. cuenca_limpieza_optimizado.gpkg - GeoPackage con rutas optimizadas")
+    print("="*70 + "\n")
+"""
+
+if __name__ == "__main__":
+    random.seed(42)
+    vrp = VRPSystem()
+ 
+    print(f"\nOptimizando {len(vrp.customers)} clientes con GA (2 camiones, split variable)...")
+ 
+    # ── Parámetros desde CONFIG (ya conectados) ──────────────────────────────
+    CONFIG['MAX_SHIFT_TIME'] = 10.0
+    N_TRUCKS = 2
+    POP_SIZE       = CONFIG['POPULATION_SIZE']      # 60
+    GENERATIONS    = CONFIG['GENERATIONS']           # 400
+    MUT_PROB       = CONFIG['MUTATION_PROBABILITY']  # 0.25  ← antes ignorado
+    TOURN_SIZE     = CONFIG['TOURNAMENT_SIZE']       # 5     ← antes ignorado
+    ELITE_SIZE     = 10
+    NN_RATIO       = 0.20                            # 20% Nearest Neighbor
+ 
+    # ── Población inicial mixta ───────────────────────────────────────────────
+    nn_count     = int(POP_SIZE * NN_RATIO)
+    random_count = POP_SIZE - nn_count
+ 
+    print(f"Generando población inicial:")
+    print(f"  - {nn_count} individuos Nearest Neighbor (randomness=0.17)")
+    print(f"  - {random_count} individuos aleatorios")
+ 
+    pop = []
+    for _ in range(nn_count):
+        pop.append(create_nearest_neighbor_individual(vrp, randomness=0.17))
+    for _ in range(random_count):
+        pop.append(create_individual(vrp.customers))
+ 
+    # ── Solución inicial (antes de optimizar) ────────────────────────────────
+    print("\n" + "="*70)
+    print("ANÁLISIS DE LA SOLUCIÓN INICIAL (SIN OPTIMIZAR)")
+    print("="*70)
+    _, initial_routes = evaluate_chromosome(pop[0], vrp, n_trucks=N_TRUCKS)
+    export_initial_solution_to_html(vrp, initial_routes, "solucion_inicial.html")
+    print_detailed_solution_analysis(vrp, initial_routes, "SOLUCIÓN INICIAL")
+ 
+    # ── Bucle evolutivo ───────────────────────────────────────────────────────
+    best_fitness = float('inf')
+    best_sol = []
+ 
+    for gen in range(GENERATIONS):
+        # Evaluar toda la población
+        scored = []
+        for ind in pop:
+            fitness, r = evaluate_chromosome(ind, vrp, n_trucks=N_TRUCKS)
+            scored.append((fitness, ind, r))
+            if fitness < best_fitness:
+                best_fitness = fitness
+                best_sol = r
+ 
+        scored.sort(key=lambda x: x[0])
+ 
+        # Elitismo: conservar los mejores sin cambios
+        elite = [s[1] for s in scored[:ELITE_SIZE]]
+        new_pop = elite[:]
+ 
+        # Generar el resto mediante selección por torneo + cruce + mutación
+        while len(new_pop) < POP_SIZE:
+            # Selección por torneo real (usa TOURN_SIZE de CONFIG)
+            p1 = tournament_selection(scored, TOURN_SIZE)
+            p2 = tournament_selection(scored, TOURN_SIZE)
+ 
+            child = ordered_crossover(p1, p2)
+ 
+            # Mutación con probabilidad MUT_PROB (usa MUTATION_PROBABILITY de CONFIG)
+            if random.random() < MUT_PROB:
+                tipo = random.random()
+                if tipo < 0.40:
+                    child = mutate(child)            # Swap: reordena clientes
+                elif tipo < 0.75:
+                    child = inversion_mutation(child) # 2-Opt: invierte segmento
+                else:
+                    child = split_mutation(child)     # Nuevo: cambia la división
+ 
+            new_pop.append(child)
+ 
+        pop = new_pop
+ 
+        if gen % 50 == 0:
+            split_actual = best_sol  # ya es la estructura de rutas
+            n1 = len(best_sol[0]) if len(best_sol) > 0 else 0
+            n2 = len(best_sol[1]) if len(best_sol) > 1 else 0
+            print(f"Gen {gen:>3} | Fitness: {best_fitness:>10.2f} | "
+                  f"Clientes C1={n1}, C2={n2}")
+ 
+    assert len(best_sol) <= N_TRUCKS, \
+        f"[ERROR] Se generaron {len(best_sol)} rutas, esperadas {N_TRUCKS}"
+ 
+    # ── Resultados finales ────────────────────────────────────────────────────
+    print("\n" + "="*60)
+    print(f"       RESULTADOS FINALES (Fitness GA: {best_fitness:.2f})")
+    print("="*60)
+ 
+    total_real_km   = 0.0
+    total_real_load = 0.0
+ 
+    print(f"{'Camión':<10} | {'Carga (t)':<12} | {'Dist. (km)':<12} | {'Tiempo':<10} | {'Clientes':<10}")
+    print("-" * 65)
+ 
+    for i, route in enumerate(best_sol):
+        r_km, r_load, r_time = calculate_route_metrics(vrp, route)
+        total_real_km   += r_km
+        total_real_load += r_load
+        hours   = int(r_time)
+        minutes = int((r_time - hours) * 60)
+        n_clientes = sum(1 for n in route if n != vrp.landfill)
+        print(f"Ruta {i+1:<5} | {r_load:<12.2f} | {r_km:<12.2f} | "
+              f"{hours}h {minutes:02d}m    | {n_clientes:<10}")
+ 
+    print("-" * 65)
+    print(f"TOTAL FLOTA: {total_real_load:.2f} ton | {total_real_km:.2f} km")
+    print("="*60)
+ 
+    print_detailed_solution_analysis(vrp, best_sol, title="SOLUCIÓN OPTIMIZADA FINAL")
+ 
+    # ── Exportar resultados ───────────────────────────────────────────────────
+    try:
+        export_routes_to_html(vrp, best_sol, filename="rutas_optimizadas.html")
+        print("[OK] HTML de rutas generado: rutas_optimizadas.html")
+    except Exception as e:
+        print(f"[ERROR] HTML: {e}")
+        import traceback; traceback.print_exc()
+ 
+    try:
+        export_routes_to_geopackage(
+            vrp_system=vrp,
+            solution=best_sol,
+            input_gpkg="cuenca_limpieza.gpkg",
+            output_gpkg="cuenca_limpieza_optimizado.gpkg"
+        )
+        print("[OK] GeoPackage optimizado generado: cuenca_limpieza_optimizado.gpkg")
+    except Exception as e:
+        print(f"[ERROR] GeoPackage: {e}")
+        import traceback; traceback.print_exc()
+ 
+    print("\n" + "="*70)
+    print("PROCESO FINALIZADO - ARCHIVOS GENERADOS:")
+    print("="*70)
+    print("1. rutas_optimizadas.html          - Visualización web animada")
     print("2. cuenca_limpieza_optimizado.gpkg - GeoPackage con rutas optimizadas")
     print("="*70 + "\n")
