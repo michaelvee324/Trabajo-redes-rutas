@@ -22,19 +22,19 @@ except AttributeError:
     pass  # Python 2 or non-standard environment
 
 CONFIG = {
-    'MAX_CAPACITY': 9.0,        
+    'MAX_CAPACITY': 9.0,        # Operativo miérc-sáb (6-8t real → 9t techo)
     'MAX_SHIFT_TIME': 8.0,       
     'COLLECTION_TIME': 0.0,
     
     # VELOCIDADES CONFIGURABLES (km/h) - NUEVA SECCIÓN
-    'SPEED_EMPTY_TO_ZONE': 40.0,      # Vacío: Garage → Primera recolección
-    'SPEED_COLLECTING': 10.0,          # Recolectando en zona delimitada
+    'SPEED_EMPTY_TO_ZONE': 70.0,      # Vacío: Garage → Primera recolección
+    'SPEED_COLLECTING': 10,          # Recolectando en zona delimitada
     'SPEED_FULL_TO_LANDFILL': 30.0,   # Lleno: Última recolección → Relleno
-    'SPEED_RETURN_EMPTY': 40.0,       # Vacío: Relleno → Garage
+    'SPEED_RETURN_EMPTY': 70.0,       # Vacío: Relleno → Garage
     
     # COMBUSTIBLE - NUEVA SECCIÓN
     'KM_PER_GALLON': 5.0,   # Galones por kilómetro
-    'FUEL_PRICE_PER_GALLON': 2.70,    # Dólares por galón
+    'FUEL_PRICE_PER_GALLON': 3.10,    # Dólares por galón
     
     'POPULATION_SIZE': 60,
     'GENERATIONS': 400,
@@ -46,6 +46,7 @@ CONFIG = {
     
     'MAX_BASURA_SUBGRAFO': 57.59
 }
+
 
 class VRPSystem:
     def __init__(self, gpkg_file="cuenca_limpieza.gpkg"):
@@ -229,10 +230,10 @@ class VRPSystem:
             print(f"[ERROR] Nodo no encontrado: {e}")
             return 999999.0
     
-    def get_path(self, node_from, node_to):
-        """
+    """def get_path(self, node_from, node_to):
+        
         Obtiene el camino completo (lista de nodos) entre dos puntos.
-        """
+        
         if node_from == node_to:
             return [node_from]
         
@@ -250,155 +251,42 @@ class VRPSystem:
             return [node_from, node_to]
         except nx.NodeNotFound as e:
             print(f"[ERROR] Nodo no encontrado: {e}")
+            return [node_from, node_to]"""
+            
+    def get_path(self, node_from, node_to):
+        if node_from == node_to:
+            return [node_from]
+
+        # Usar subgrafo si ambos nodos están en él (evita salir del sector)
+        graph = self.city_graph
+        if (hasattr(self, 'subgraph') and self.subgraph is not None
+                and node_from in self.subgraph.nodes
+                and node_to in self.subgraph.nodes):
+            graph = self.subgraph
+
+        try:
+            path = nx.shortest_path(graph, source=node_from, target=node_to, weight='length')
+            return path
+
+        except nx.NetworkXNoPath:
+            # Fallback al grafo completo si no hay camino en el subgrafo
+            if graph is not self.city_graph:
+                try:
+                    return nx.shortest_path(self.city_graph, source=node_from, target=node_to, weight='length')
+                except Exception:
+                    pass
+            print(f"[WARNING] No hay camino entre {node_from} y {node_to}")
+            return [node_from, node_to]
+        except nx.NodeNotFound as e:
+            print(f"[ERROR] Nodo no encontrado: {e}")
             return [node_from, node_to]
 
-
-"""def evaluate_chromosome(chromosome, system):
-    routes = []
-    current_route = []
-    
-    current_load = 0.0
-    current_time = 0.0
-    total_distance = 0.0
-    
-    current_node = system.garage
-    
-    TRUCK_PENALTY = 0.0 
-    
-    for customer in chromosome:
-        node_demand = system.city_graph.nodes[customer].get('demand', 1.0)
-        
-        dist_to_cust = system.get_dist_km(current_node, customer)
-        
-        # Determinar la velocidad correcta según el estado actual
-        if current_node == system.garage:
-            speed_to_customer = CONFIG['SPEED_EMPTY_TO_ZONE']
-        elif current_node == system.landfill:
-            speed_to_customer = CONFIG['SPEED_EMPTY_TO_ZONE']
-        else:
-            speed_to_customer = CONFIG['SPEED_COLLECTING']
-        
-        time_to_cust = dist_to_cust / speed_to_customer
-        service_time = CONFIG['COLLECTION_TIME']
-        
-        dist_cust_to_dump = system.get_dist_km(customer, system.landfill)
-        time_cust_to_dump = dist_cust_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
-        
-        dist_dump_to_garage = system.get_dist_km(system.landfill, system.garage)
-        time_dump_to_garage = dist_dump_to_garage / CONFIG['SPEED_RETURN_EMPTY']
-        
-        # ════════════════════════════════════════════════════════════════════
-        # VERIFICACIÓN ESTRICTA DE CAPACIDAD
-        # ════════════════════════════════════════════════════════════════════
-        
-        # Caso 1: ¿Cabe en la ruta actual? (capacidad Y tiempo)
-        time_if_add = (current_time + time_to_cust + service_time + 
-                       time_cust_to_dump + time_dump_to_garage)
-        
-        if (current_load + node_demand <= CONFIG['MAX_CAPACITY']) and (time_if_add <= CONFIG['MAX_SHIFT_TIME']):
-            # SÍ CABE - Agregar a la ruta actual
-            current_route.append(customer)
-            current_load += node_demand
-            current_time += (time_to_cust + service_time)
-            total_distance += dist_to_cust
-            current_node = customer
-            
-        else:
-            # NO CABE - Necesitamos decidir qué hacer
-            
-            # Opción A: ¿Podemos hacer descarga intermedia?
-            # (ir al landfill, descargar, y seguir con este cliente)
-            
-            dist_to_dump = system.get_dist_km(current_node, system.landfill)
-            time_to_dump = dist_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
-            time_at_dump = current_time + time_to_dump
-            
-            dist_dump_to_cust = system.get_dist_km(system.landfill, customer)
-            time_dump_to_cust = dist_dump_to_cust / CONFIG['SPEED_EMPTY_TO_ZONE']
-            
-            # Tiempo total SI hacemos descarga intermedia
-            projected_total_time = (time_at_dump + time_dump_to_cust + 
-                                    service_time + time_cust_to_dump + 
-                                    time_dump_to_garage)
-            
-            # ════════════════════════════════════════════════════════════════
-            # FIX CRÍTICO: Verificar capacidad DESPUÉS de descarga intermedia
-            # ════════════════════════════════════════════════════════════════
-            
-            # Solo podemos hacer descarga intermedia si:
-            # 1. El motivo es CAPACIDAD (no tiempo)
-            # 2. El tiempo proyectado cabe
-            # 3. El cliente SOLO cabe en un camión vacío (node_demand <= MAX_CAPACITY)
-            
-            can_do_intermediate_dump = (
-                (current_load + node_demand > CONFIG['MAX_CAPACITY']) and  # Es por capacidad
-                (projected_total_time <= CONFIG['MAX_SHIFT_TIME']) and      # El tiempo cabe
-                (node_demand <= CONFIG['MAX_CAPACITY'])                      # El cliente cabe solo
-            )
-            
-            if can_do_intermediate_dump:
-                # DESCARGA INTERMEDIA - continuar la misma ruta
-                current_route.append(system.landfill)
-                
-                total_distance += dist_to_dump
-                total_distance += dist_dump_to_cust
-                
-                # RESETEAR CARGA (acabamos de descargar)
-                current_load = 0.0  # ← FIX: Empezar desde 0, no desde node_demand
-                current_time = time_at_dump + time_dump_to_cust + service_time
-                
-                # Ahora SÍ agregar el cliente
-                current_route.append(customer)
-                current_load += node_demand  # ← FIX: SUMAR la demanda correctamente
-                current_node = customer
-                
-            else:
-                # NUEVA RUTA - cerrar la actual y empezar una nueva
-                
-                # Cerrar ruta actual
-                total_distance += system.get_dist_km(current_node, system.landfill)
-                routes.append(current_route)
-                
-                total_distance += TRUCK_PENALTY
-                
-                # Iniciar nueva ruta
-                current_route = [customer]
-                current_load = node_demand  # ← Esto está bien
-                
-                dist_start = system.get_dist_km(system.garage, customer)
-                total_distance += dist_start
-                current_time = (dist_start / CONFIG['SPEED_EMPTY_TO_ZONE'] + CONFIG['COLLECTION_TIME'])
-                current_node = customer
-
-    # Cerrar última ruta
-    if current_route:
-        total_distance += system.get_dist_km(current_node, system.landfill)
-        dist_return = system.get_dist_km(system.landfill, system.garage)
-        total_distance += dist_return
-        routes.append(current_route)
-
-    # DIAGNÓSTICO: ¿Cuántos clientes visitamos?
-    visited = set()
-    for route in routes:
-        for node in route:
-            if node != system.landfill:
-                visited.add(node)
-    
-    if len(visited) != len(chromosome):
-        print(f"[WARNING] Solo visitamos {len(visited)}/{len(chromosome)} clientes")
-        missing = set(chromosome) - visited
-        print(f"Faltantes: {list(missing)[:5]}...")  # Mostrar primeros 5
-        
-    return total_distance, routes"""
-
-
-"""
 def evaluate_chromosome(chromosome, system, n_trucks=2):
-    
+    """
     Evalúa un cromosoma dividiéndolo en exactamente n_trucks rutas.
     El punto de división es el 'gen' que separa los clientes entre camiones.
     Penaliza fuertemente si algún camión viola capacidad o tiempo.
-    
+    """
     size = len(chromosome)
 
     # Dividir el cromosoma en n_trucks segmentos iguales (el GA aprenderá
@@ -491,103 +379,9 @@ def evaluate_chromosome(chromosome, system, n_trucks=2):
             total_distance += system.get_dist_km(system.landfill, system.garage)
             routes.append(route)
 
-    return total_distance, routes"""
-
-def evaluate_chromosome(chromosome, system, n_trucks=2):
-    """
-    Evalúa un cromosoma con gen de corte variable.
- 
-    El cromosoma tiene formato: [c1, c2, ..., cN, split_point]
-    donde split_point define cuántos clientes van al camión 1.
- 
-    Penaliza fuertemente si algún camión viola capacidad o tiempo.
-    """
-    # Separar clientes del gen de corte
-    clients = chromosome[:-1]
-    split = chromosome[-1]
- 
-    # Asegurar que el split es válido
-    n = len(clients)
-    split = max(1, min(split, n - 1))
- 
-    segments = [clients[:split], clients[split:]]
- 
-    routes = []
-    total_distance = 0.0
-    INFEASIBILITY_PENALTY = 99999.0
- 
-    for seg in segments:
-        if not seg:
-            continue
- 
-        route = []
-        current_load = 0.0
-        current_time = 0.0
-        current_node = system.garage
-        feasible = True
- 
-        for customer in seg:
-            node_demand = system.city_graph.nodes[customer].get('demand', 1.0)
- 
-            if current_node in (system.garage, system.landfill):
-                speed = CONFIG['SPEED_EMPTY_TO_ZONE']
-            else:
-                speed = CONFIG['SPEED_COLLECTING']
- 
-            dist_to_cust = system.get_dist_km(current_node, customer)
-            time_to_cust = dist_to_cust / speed
-            service_time = CONFIG['COLLECTION_TIME']
- 
-            dist_cust_to_dump = system.get_dist_km(customer, system.landfill)
-            time_cust_to_dump = dist_cust_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
-            dist_dump_to_garage = system.get_dist_km(system.landfill, system.garage)
-            time_dump_to_garage = dist_dump_to_garage / CONFIG['SPEED_RETURN_EMPTY']
- 
-            time_if_add = (current_time + time_to_cust + service_time +
-                           time_cust_to_dump + time_dump_to_garage)
- 
-            if (current_load + node_demand <= CONFIG['MAX_CAPACITY'] and
-                    time_if_add <= CONFIG['MAX_SHIFT_TIME']):
-                route.append(customer)
-                current_load += node_demand
-                current_time += time_to_cust + service_time
-                total_distance += dist_to_cust
-                current_node = customer
-            else:
-                # Intentar descarga intermedia
-                dist_to_dump = system.get_dist_km(current_node, system.landfill)
-                time_to_dump = dist_to_dump / CONFIG['SPEED_FULL_TO_LANDFILL']
-                time_at_dump = current_time + time_to_dump
-                dist_dump_to_cust = system.get_dist_km(system.landfill, customer)
-                time_dump_to_cust = dist_dump_to_cust / CONFIG['SPEED_EMPTY_TO_ZONE']
- 
-                projected_time = (time_at_dump + time_dump_to_cust + service_time +
-                                  time_cust_to_dump + time_dump_to_garage)
- 
-                can_intermediate = (
-                    current_load + node_demand > CONFIG['MAX_CAPACITY'] and
-                    projected_time <= CONFIG['MAX_SHIFT_TIME'] and
-                    node_demand <= CONFIG['MAX_CAPACITY']
-                )
- 
-                if can_intermediate:
-                    route.append(system.landfill)
-                    total_distance += dist_to_dump + dist_dump_to_cust
-                    current_load = node_demand
-                    current_time = time_at_dump + time_dump_to_cust + service_time
-                    route.append(customer)
-                    current_node = customer
-                else:
-                    feasible = False
-                    total_distance += INFEASIBILITY_PENALTY
- 
-        if route:
-            last = route[-1]
-            total_distance += system.get_dist_km(last, system.landfill)
-            total_distance += system.get_dist_km(system.landfill, system.garage)
-            routes.append(route)
- 
     return total_distance, routes
+
+
 
 def create_individual_2trucks(node_list):
     """
@@ -604,28 +398,13 @@ def create_nn_individual_2trucks(system, randomness=0.17):
     """Nearest Neighbor para 2 camiones — igual que antes, el corte es implícito."""
     return create_nearest_neighbor_individual(system, randomness)
 
-"""
 def create_individual(node_list):
     ind = node_list.copy()
     random.shuffle(ind)
-    return ind"""
-
-def create_individual(node_list):
-    """
-    Cromosoma = permutación de clientes + gen de corte al final.
-    El gen de corte indica dónde se divide la lista entre los 2 camiones.
-    """
-    n = len(node_list)
-    ind = node_list.copy()
-    random.shuffle(ind)
-    split = random.randint(1, n - 1)  # Al menos 1 cliente por camión
-    ind.append(split)                 # El último elemento es el punto de corte
     return ind
 
-
-    """
 def create_nearest_neighbor_individual(system, randomness=0.17):
-    
+    """
     Crea un individuo usando heurística de Vecino Más Cercano.
     
     Args:
@@ -635,7 +414,7 @@ def create_nearest_neighbor_individual(system, randomness=0.17):
     
     Returns:
         Lista ordenada de clientes (cromosoma)
-    
+    """
     unvisited = set(system.customers)
     route = []
     
@@ -659,37 +438,34 @@ def create_nearest_neighbor_individual(system, randomness=0.17):
         current = chosen_node
     
     return route
-    """
-    
-def create_nearest_neighbor_individual(system, randomness=0.17):
-    """
-    Heurística Nearest Neighbor para 2 camiones con gen de corte variable.
- 
-    Construye el cromosoma ordenando clientes por proximidad desde el garage,
-    luego elige un punto de corte aleatorio sesgado al centro (para que ambos
-    camiones tengan carga razonable desde el inicio).
-    """
-    unvisited = set(system.customers)
-    route = []
-    current = system.garage
- 
-    while unvisited:
-        distances = [(system.get_dist_km(current, node), node) for node in unvisited]
-        distances.sort()
-        k = max(1, int(len(distances) * randomness))
-        k = min(k, len(distances))
-        _, chosen_node = random.choice(distances[:k])
-        route.append(chosen_node)
-        unvisited.remove(chosen_node)
-        current = chosen_node
- 
-    n = len(route)
-    # Punto de corte sesgado al centro ±25% para equilibrar carga inicial
-    centro = n // 2
-    margen = max(1, n // 4)
-    split = random.randint(max(1, centro - margen), min(n - 1, centro + margen))
-    route.append(split)
-    return route
+
+def create_zoned_individual(system, n_trucks=2, randomness=0.17):
+    lats = []
+    for n in system.customers:
+        y = system.city_graph.nodes[n].get('y', None)
+        if y is not None:
+            lats.append((y, n))
+    if not lats:
+        return create_nearest_neighbor_individual(system, randomness)
+    lat_median = sum(y for y, _ in lats) / len(lats)
+    zone_north = [n for y, n in lats if y >= lat_median]
+    zone_south = [n for y, n in lats if y <  lat_median]
+    def nn_order(zone, start):
+        unvisited = set(zone)
+        route = []
+        current = start
+        while unvisited:
+            distances = [(system.get_dist_km(current, node), node) for node in unvisited]
+            distances.sort()
+            k = max(1, int(len(distances) * randomness))
+            k = min(k, len(distances))
+            _, chosen = random.choice(distances[:k])
+            route.append(chosen)
+            unvisited.remove(chosen)
+            current = chosen
+        return route
+    return nn_order(zone_north, system.garage) + nn_order(zone_south, system.garage)
+
 
 
 def calculate_real_physics(vrp, routes):
@@ -716,7 +492,6 @@ def calculate_real_physics(vrp, routes):
         
     return real_distance, real_load
 
-"""
 def ordered_crossover(parent1, parent2):
     size = len(parent1)
     a, b = sorted(random.sample(range(size), 2))
@@ -731,65 +506,16 @@ def ordered_crossover(parent1, parent2):
             child[current] = parent2[p2_idx]
             current = (current + 1) % size
         p2_idx = (p2_idx + 1) % size
-    return child """
+    return child
 
-def ordered_crossover(parent1, parent2):
-    """
-    OX Crossover adaptado: opera solo sobre la parte de clientes.
-    El gen de corte (último elemento) se hereda promediando ambos padres
-    y aplicando una pequeña perturbación aleatoria.
-    """
-    # Separar clientes y gen de corte
-    p1_clients = parent1[:-1]
-    p2_clients = parent2[:-1]
-    split1 = parent1[-1]
-    split2 = parent2[-1]
- 
-    size = len(p1_clients)
-    a, b = sorted(random.sample(range(size), 2))
-    child_clients = [-1] * size
-    child_clients[a:b+1] = p1_clients[a:b+1]
- 
-    current = (b + 1) % size
-    p2_idx = (b + 1) % size
- 
-    while -1 in child_clients:
-        if p2_clients[p2_idx] not in child_clients:
-            child_clients[current] = p2_clients[p2_idx]
-            current = (current + 1) % size
-        p2_idx = (p2_idx + 1) % size
- 
-    # Gen de corte: promedio de padres + perturbación aleatoria pequeña
-    avg_split = (split1 + split2) // 2
-    perturbacion = random.randint(-max(1, size // 8), max(1, size // 8))
-    child_split = max(1, min(size - 1, avg_split + perturbacion))
- 
-    child_clients.append(child_split)
-    return child_clients
-
-"""
 def mutate(ind):
-    Swap mutation: intercambia dos clientes aleatorios
+    """Swap mutation: intercambia dos clientes aleatorios"""
     a, b = random.sample(range(len(ind)), 2)
     ind[a], ind[b] = ind[b], ind[a]
     return ind
-"""
 
-def mutate(ind):
-    """
-    Swap mutation: intercambia dos clientes aleatorios.
-    El gen de corte (último elemento) no se toca.
-    """
-    clients = ind[:-1]
-    split = ind[-1]
-    a, b = random.sample(range(len(clients)), 2)
-    clients[a], clients[b] = clients[b], clients[a]
-    clients.append(split)
-    return clients
-
-"""
 def inversion_mutation(ind):
-    
+    """
     2-Opt / Inversion mutation: invierte un segmento de la ruta.
     Esto ayuda a deshacer cruces (nudos) en la ruta.
     
@@ -797,7 +523,7 @@ def inversion_mutation(ind):
     Antes: [A, B, C, D, E, F]
     Seleccionar segmento [B, C, D] (índices 1-3)
     Después: [A, D, C, B, E, F]
-    
+    """
     if len(ind) < 3:
         return ind
     
@@ -807,51 +533,7 @@ def inversion_mutation(ind):
     # Invertir el segmento entre i y j (inclusive)
     ind[i:j+1] = reversed(ind[i:j+1])
     
-    return ind"""
-
-def inversion_mutation(ind):
-    """
-    2-Opt / Inversion mutation: invierte un segmento de clientes.
-    Con probabilidad 0.3 también muta el gen de corte (±1 a ±3 posiciones).
-    """
-    clients = ind[:-1]
-    split = ind[-1]
-    n = len(clients)
- 
-    if n >= 3:
-        i, j = sorted(random.sample(range(n), 2))
-        clients[i:j+1] = reversed(clients[i:j+1])
- 
-    # Mutar el gen de corte ocasionalmente para explorar divisiones distintas
-    if random.random() < 0.3:
-        delta = random.randint(-3, 3)
-        split = max(1, min(n - 1, split + delta))
- 
-    clients.append(split)
-    return clients
-
-def split_mutation(ind):
-    """
-    Mutación exclusiva del gen de corte: asigna un punto de división
-    completamente nuevo. Útil para escapar de divisiones localmente óptimas.
-    """
-    clients = ind[:-1]
-    n = len(clients)
-    new_split = random.randint(1, n - 1)
-    clients.append(new_split)
-    return clients
- 
- 
-def tournament_selection(scored, tournament_size):
-    """
-    Selección por torneo real usando CONFIG['TOURNAMENT_SIZE'].
- 
-    Elige 'tournament_size' individuos al azar y retorna el de menor fitness.
-    Mayor tournament_size → mayor presión selectiva.
-    """
-    contenders = random.sample(scored, min(tournament_size, len(scored)))
-    winner = min(contenders, key=lambda x: x[0])
-    return winner[1]  # Retorna el cromosoma (ind)
+    return ind
 
 def detailed_audit(vrp, best_routes):
     print(f"\n{'='*70}")
@@ -1584,12 +1266,14 @@ def export_initial_solution_to_html(vrp, routes, filename="solucion_inicial.html
 
         # Ruta completa siguiendo calles
         full_path_nodes = []
+        
         full_path_nodes.extend(vrp.get_path(vrp.garage, route[0]))
         for j in range(len(route) - 1):
             seg = vrp.get_path(route[j], route[j + 1])
             full_path_nodes.extend(seg[1:])
         if route[-1] != vrp.landfill:
             full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:])
+            
 
         raw_coords = [
             (G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x'])
@@ -1956,12 +1640,14 @@ def export_routes_to_html(vrp, routes, filename="rutas_optimizadas.html"):
 
         # Ruta completa siguiendo calles
         full_path_nodes = []
+        
         full_path_nodes.extend(vrp.get_path(vrp.garage, route[0]))
         for j in range(len(route) - 1):
             seg = vrp.get_path(route[j], route[j + 1])
             full_path_nodes.extend(seg[1:])
         if route[-1] != vrp.landfill:
             full_path_nodes.extend(vrp.get_path(route[-1], vrp.landfill)[1:])
+            
 
         raw_coords = [
             (G_latlon.nodes[n]['y'], G_latlon.nodes[n]['x'])
@@ -2637,7 +2323,6 @@ def export_routes_to_geopackage(vrp_system, solution,
         import traceback
         traceback.print_exc()
 
-"""
 if __name__ == "__main__":
     random.seed(42)
     vrp = VRPSystem()
@@ -2648,36 +2333,49 @@ if __name__ == "__main__":
     N_TRUCKS = 2
 
     # Población mixta: 20% heurística (NN), 80% aleatoria
-    nn_count = int(CONFIG['POPULATION_SIZE'] * 0.2)
-    random_count = CONFIG['POPULATION_SIZE'] - nn_count
+    #nn_count = int(CONFIG['POPULATION_SIZE'] * 0.2)
+    #random_count = CONFIG['POPULATION_SIZE'] - nn_count
     
     print(f"Generando población inicial:")
-    print(f"  - {nn_count} individuos con Nearest Neighbor (randomness=0.3)"+f"\n  - {random_count} individuos aleatorios")
+    #print(f"  - {nn_count} individuos con Nearest Neighbor (randomness=0.3)"+f"\n  - {random_count} individuos aleatorios")
     
-    pop = []
+    #pop = []
     
     # Generar individuos con Nearest Neighbor
-    for _ in range(nn_count):
-        pop.append(create_nearest_neighbor_individual(vrp, randomness=0.17))
+    #for _ in range(nn_count):
+        #pop.append(create_nearest_neighbor_individual(vrp, randomness=0.17))
     
     # Generar individuos aleatorios
+    #for _ in range(random_count):
+        #pop.append(create_individual(vrp.customers))
+        
+        
+    zone_count   = int(CONFIG['POPULATION_SIZE'] * 0.20)
+    nn_count     = int(CONFIG['POPULATION_SIZE'] * 0.20)
+    random_count = CONFIG['POPULATION_SIZE'] - zone_count - nn_count
+
+    pop = []
+    for _ in range(zone_count):
+        pop.append(create_zoned_individual(vrp, n_trucks=N_TRUCKS, randomness=0.17))
+    for _ in range(nn_count):
+        pop.append(create_nearest_neighbor_individual(vrp, randomness=0.17))
     for _ in range(random_count):
         pop.append(create_individual(vrp.customers))
 
     print("Capturando estado inicial (antes de optimizar)...")
 
 
-    
+    """
     initial_chromosome = pop[0]
     _, initial_routes_structure = evaluate_chromosome(initial_chromosome, vrp)
-    export_initial_solution_to_html(vrp, initial_routes_structure, filename="solucion_inicial.html")
+    export_initial_solution_to_html(vrp, initial_routes_structure, filename="solucion_inicial.html")"""
 
     # AGREGAR ESTO:
     print("\n" + "="*70)
     print("ANÁLISIS DE LA SOLUCIÓN INICIAL (SIN OPTIMIZAR)")
     print("="*70)
-    print_detailed_solution_analysis(vrp, initial_routes_structure, 
-                                 title="SOLUCIÓN INICIAL (SIN OPTIMIZAR)")
+    """print_detailed_solution_analysis(vrp, initial_routes_structure, 
+                                 title="SOLUCIÓN INICIAL (SIN OPTIMIZAR)")"""
 
     _, initial_routes = evaluate_chromosome(pop[0], vrp, n_trucks=N_TRUCKS)
     export_initial_solution_to_html(vrp, initial_routes, "solucion_inicial.html")
@@ -2706,11 +2404,13 @@ if __name__ == "__main__":
             p2 = random.choice(scored[:30])[1]
             child = ordered_crossover(p1, p2)
             # Aplicar mutación: 50% swap, 50% inversion (2-opt)
+            
             if random.random() < 0.5:
                 child = mutate(child)  # Swap mutation
             else:
                 child = inversion_mutation(child)  # 2-Opt mutation
             
+                
             new_pop.append(child)
         pop = new_pop
         
@@ -2779,150 +2479,5 @@ if __name__ == "__main__":
     print("PROCESO FINALIZADO - ARCHIVOS GENERADOS:")
     print("="*70)
     print("1. rutas_optimizadas.html - Visualización web animada")
-    print("2. cuenca_limpieza_optimizado.gpkg - GeoPackage con rutas optimizadas")
-    print("="*70 + "\n")
-"""
-
-if __name__ == "__main__":
-    random.seed(42)
-    vrp = VRPSystem()
- 
-    print(f"\nOptimizando {len(vrp.customers)} clientes con GA (2 camiones, split variable)...")
- 
-    # ── Parámetros desde CONFIG (ya conectados) ──────────────────────────────
-    CONFIG['MAX_SHIFT_TIME'] = 10.0
-    N_TRUCKS = 2
-    POP_SIZE       = CONFIG['POPULATION_SIZE']      # 60
-    GENERATIONS    = CONFIG['GENERATIONS']           # 400
-    MUT_PROB       = CONFIG['MUTATION_PROBABILITY']  # 0.25  ← antes ignorado
-    TOURN_SIZE     = CONFIG['TOURNAMENT_SIZE']       # 5     ← antes ignorado
-    ELITE_SIZE     = 10
-    NN_RATIO       = 0.20                            # 20% Nearest Neighbor
- 
-    # ── Población inicial mixta ───────────────────────────────────────────────
-    nn_count     = int(POP_SIZE * NN_RATIO)
-    random_count = POP_SIZE - nn_count
- 
-    print(f"Generando población inicial:")
-    print(f"  - {nn_count} individuos Nearest Neighbor (randomness=0.17)")
-    print(f"  - {random_count} individuos aleatorios")
- 
-    pop = []
-    for _ in range(nn_count):
-        pop.append(create_nearest_neighbor_individual(vrp, randomness=0.17))
-    for _ in range(random_count):
-        pop.append(create_individual(vrp.customers))
- 
-    # ── Solución inicial (antes de optimizar) ────────────────────────────────
-    print("\n" + "="*70)
-    print("ANÁLISIS DE LA SOLUCIÓN INICIAL (SIN OPTIMIZAR)")
-    print("="*70)
-    _, initial_routes = evaluate_chromosome(pop[0], vrp, n_trucks=N_TRUCKS)
-    export_initial_solution_to_html(vrp, initial_routes, "solucion_inicial.html")
-    print_detailed_solution_analysis(vrp, initial_routes, "SOLUCIÓN INICIAL")
- 
-    # ── Bucle evolutivo ───────────────────────────────────────────────────────
-    best_fitness = float('inf')
-    best_sol = []
- 
-    for gen in range(GENERATIONS):
-        # Evaluar toda la población
-        scored = []
-        for ind in pop:
-            fitness, r = evaluate_chromosome(ind, vrp, n_trucks=N_TRUCKS)
-            scored.append((fitness, ind, r))
-            if fitness < best_fitness:
-                best_fitness = fitness
-                best_sol = r
- 
-        scored.sort(key=lambda x: x[0])
- 
-        # Elitismo: conservar los mejores sin cambios
-        elite = [s[1] for s in scored[:ELITE_SIZE]]
-        new_pop = elite[:]
- 
-        # Generar el resto mediante selección por torneo + cruce + mutación
-        while len(new_pop) < POP_SIZE:
-            # Selección por torneo real (usa TOURN_SIZE de CONFIG)
-            p1 = tournament_selection(scored, TOURN_SIZE)
-            p2 = tournament_selection(scored, TOURN_SIZE)
- 
-            child = ordered_crossover(p1, p2)
- 
-            # Mutación con probabilidad MUT_PROB (usa MUTATION_PROBABILITY de CONFIG)
-            if random.random() < MUT_PROB:
-                tipo = random.random()
-                if tipo < 0.40:
-                    child = mutate(child)            # Swap: reordena clientes
-                elif tipo < 0.75:
-                    child = inversion_mutation(child) # 2-Opt: invierte segmento
-                else:
-                    child = split_mutation(child)     # Nuevo: cambia la división
- 
-            new_pop.append(child)
- 
-        pop = new_pop
- 
-        if gen % 50 == 0:
-            split_actual = best_sol  # ya es la estructura de rutas
-            n1 = len(best_sol[0]) if len(best_sol) > 0 else 0
-            n2 = len(best_sol[1]) if len(best_sol) > 1 else 0
-            print(f"Gen {gen:>3} | Fitness: {best_fitness:>10.2f} | "
-                  f"Clientes C1={n1}, C2={n2}")
- 
-    assert len(best_sol) <= N_TRUCKS, \
-        f"[ERROR] Se generaron {len(best_sol)} rutas, esperadas {N_TRUCKS}"
- 
-    # ── Resultados finales ────────────────────────────────────────────────────
-    print("\n" + "="*60)
-    print(f"       RESULTADOS FINALES (Fitness GA: {best_fitness:.2f})")
-    print("="*60)
- 
-    total_real_km   = 0.0
-    total_real_load = 0.0
- 
-    print(f"{'Camión':<10} | {'Carga (t)':<12} | {'Dist. (km)':<12} | {'Tiempo':<10} | {'Clientes':<10}")
-    print("-" * 65)
- 
-    for i, route in enumerate(best_sol):
-        r_km, r_load, r_time = calculate_route_metrics(vrp, route)
-        total_real_km   += r_km
-        total_real_load += r_load
-        hours   = int(r_time)
-        minutes = int((r_time - hours) * 60)
-        n_clientes = sum(1 for n in route if n != vrp.landfill)
-        print(f"Ruta {i+1:<5} | {r_load:<12.2f} | {r_km:<12.2f} | "
-              f"{hours}h {minutes:02d}m    | {n_clientes:<10}")
- 
-    print("-" * 65)
-    print(f"TOTAL FLOTA: {total_real_load:.2f} ton | {total_real_km:.2f} km")
-    print("="*60)
- 
-    print_detailed_solution_analysis(vrp, best_sol, title="SOLUCIÓN OPTIMIZADA FINAL")
- 
-    # ── Exportar resultados ───────────────────────────────────────────────────
-    try:
-        export_routes_to_html(vrp, best_sol, filename="rutas_optimizadas.html")
-        print("[OK] HTML de rutas generado: rutas_optimizadas.html")
-    except Exception as e:
-        print(f"[ERROR] HTML: {e}")
-        import traceback; traceback.print_exc()
- 
-    try:
-        export_routes_to_geopackage(
-            vrp_system=vrp,
-            solution=best_sol,
-            input_gpkg="cuenca_limpieza.gpkg",
-            output_gpkg="cuenca_limpieza_optimizado.gpkg"
-        )
-        print("[OK] GeoPackage optimizado generado: cuenca_limpieza_optimizado.gpkg")
-    except Exception as e:
-        print(f"[ERROR] GeoPackage: {e}")
-        import traceback; traceback.print_exc()
- 
-    print("\n" + "="*70)
-    print("PROCESO FINALIZADO - ARCHIVOS GENERADOS:")
-    print("="*70)
-    print("1. rutas_optimizadas.html          - Visualización web animada")
     print("2. cuenca_limpieza_optimizado.gpkg - GeoPackage con rutas optimizadas")
     print("="*70 + "\n")
